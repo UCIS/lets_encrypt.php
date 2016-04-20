@@ -12,6 +12,7 @@ environments (but do you really want your publicly accessible scripts to handle 
 Usage
 -----
 The script supports the following options:
+
 | Option | Argument         | Description |
 |--------|------------------|-------------|
 | -r     | web root path    | Specifies the web root directory in which the .well-known/acme-challenge/* file structure will be created |
