@@ -36,7 +36,7 @@ $use_staging_server = isset($options['s']);
 
 $acme_server = $use_staging_server ? 'https://acme-staging.api.letsencrypt.org' : 'https://acme-v01.api.letsencrypt.org';
 $ca_cert_url = 'https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.der';
-$agreement_url = 'https://letsencrypt.org/documents/LE-SA-v1.1.1-August-1-2016.pdf';
+$agreement_url = 'https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf';
 
 if ($account_key_file != '-' && file_exists($account_key_file)) {
 	$account_key = openssl_pkey_get_private('file://'.$account_key_file);
