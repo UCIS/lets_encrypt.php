@@ -1,14 +1,6 @@
 #!/usr/bin/env php
 <?php
-/*
-Copyright 2016 Ivo Smits <Ivo@UCIS.nl>. All rights reserved.
-
-This software may be used for personal use. Distribution of the complete
-unmodified source code is permitted.
-
-Additional permissions may apply for individual components. See the source code
-files or component directories for details, if applicable.
-*/
+/* Copyright 2016-2019 Ivo Smits <Ivo@UCIS.nl>. All rights reserved. This software may be used and distributed under the Simplified BSD License. */
 
 if (PHP_SAPI != 'cli') die("This script should be called from the command line!\n");
 
@@ -34,9 +26,9 @@ $server_cert_print = !isset($server_cert_file) || isset($options['p']);
 $domains = (array)$options['d'];
 $use_staging_server = isset($options['s']);
 
-$acme_server = $use_staging_server ? 'https://acme-staging.api.letsencrypt.org' : 'https://acme-v01.api.letsencrypt.org';
-$ca_cert_url = 'https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.der';
-$agreement_url = 'https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf';
+$directory = $use_staging_server ? 'https://acme-staging-v02.api.letsencrypt.org/directory' : 'https://acme-v02.api.letsencrypt.org/directory';
+$directory = file_get_contents($directory, false, stream_context_create(array('http' => array('timeout' => 10))));
+$directory = json_decode($directory, TRUE);
 
 if ($account_key_file != '-' && file_exists($account_key_file)) {
 	$account_key = openssl_pkey_get_private('file://'.$account_key_file);
@@ -52,15 +44,15 @@ if (!empty($server_cert_file) && file_exists($server_cert_file)) {
 }
 
 $acme_nonce = NULL;
-$ca_cert = NULL;
+$account_key_id = NULL;
 
-$registration = array('resource' => 'new-reg', 'agreement' => $agreement_url);
+$registration = array('termsOfServiceAgreed' => TRUE);
 if (!empty($account_email)) $registration['contact'] = array('mailto:'.$account_email);
-signed_request('/acme/new-reg', $registration, array(409));
-authorize_domains($domains, domain_authorization_challenge_callback($www_root));
-$certdata = get_certificate($server_key, $domains);
+signed_request($directory['newAccount'], $registration);
+$certdata = get_certificate($server_key, $domains, domain_authorization_challenge_callback($www_root));
+if (substr($certdata, 0, 26) !== '-----BEGIN CERTIFICATE----') throw new Exception('Invalid certificate data received'); //Sanity check so openssl won't try to open some local file
 
-$cert = openssl_x509_read(cert_to_pem($certdata));
+$cert = openssl_x509_read($certdata);
 if (!openssl_x509_check_private_key($cert, $server_key)) throw new Exception('The obtained certificate does not match the private key');
 
 $bundle = build_pem_bundle($server_key, $certdata);
@@ -69,26 +61,13 @@ if (!empty($server_cert_file)) file_put_contents($server_cert_file, $bundle);
 
 if ($server_cert_print) echo $bundle;
 
-function cert_to_pem($cert) {
-	return "-----BEGIN CERTIFICATE-----\r\n".chunk_split(base64_encode($cert), 64)."-----END CERTIFICATE-----\r\n";
-}
-
 function build_pem_bundle($key, $cert) {
-	global $ca_cert_url, $ca_cert;
-	if ($ca_cert === NULL) $ca_cert = file_get_contents($ca_cert_url, false, stream_context_create(array('http' => array('timeout' => 10))));
 	$pem = '';
 	openssl_pkey_export($key, $pem);
 	$pem .= "\r\n";
-	$pem .= cert_to_pem($cert);
+	$pem .= $cert;
 	$pem .= "\r\n";
-	$pem .= cert_to_pem($ca_cert);
 	return $pem;
-}
-
-function get_certificate($server_key, $domains) {
-	$csr = generateCertificateSigningRequest($server_key, $domains);
-	$cert = signed_request('/acme/new-cert', array('resource' => 'new-cert', 'csr' => urlbase64($csr)));
-	return $cert;
 }
 
 function domain_authorization_challenge_callback($path) {
@@ -99,8 +78,8 @@ function domain_authorization_challenge_callback($path) {
 	};
 }
 
-function authorize_domains($domains, $challenge_callback) {
-	global $account_key;
+function get_certificate($server_key, $domains, $challenge_callback) {
+	global $directory, $account_key;
 	$account_key_params = openssl_pkey_get_details($account_key);
 	$account_thumb_print = json_encode(array(
 		'e'=> urlbase64($account_key_params['rsa']['e']),
@@ -110,67 +89,79 @@ function authorize_domains($domains, $challenge_callback) {
 	$account_thumb_print = hash('sha256', $account_thumb_print, true);
 	$account_thumb_print = urlbase64($account_thumb_print);
 	if (!is_array($domains)) $domains = array($domains);
-	foreach ($domains as $domain) {
-		$domain = (string)$domain;
-		$response = signed_request('/acme/new-authz', array('resource' => 'new-authz', 'identifier' => array('type' => 'dns', 'value' => $domain)));
-		$response = json_decode($response, true);
-		$challenge = null;
-		foreach ($response['challenges'] as $challenge) if ($challenge['type'] == 'http-01') break;
-		if (!$challenge || $challenge['type'] != 'http-01') throw new Exception('No acceptable challenge offered');
-		if (preg_match('[^a-zA-Z0-9_-]', $challenge['token']) !== 0) throw new Exception('Challenge token contains illegal characters');
-		$keyauth = $challenge['token'].'.'.$account_thumb_print;
-		$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], $keyauth, $challenge['token']);
-		try {
-			$response = signed_request($challenge['uri'], array('resource' => 'challenge', 'keyAuthorization' => $keyauth));
-			$response = json_decode($response, true);
-			while ($response['status'] == 'pending') {
-				usleep(500000); //0.5sec
-				$response = file_get_contents($challenge['uri'], false, stream_context_create(array('http' => array('timeout' => 10))));
-				$response = json_decode($response, true);
+	$identifiers = array();
+	foreach ($domains as $domain) $identifiers[] = array('type' => 'dns', 'value' => (string)$domain);
+	$response = signed_request($directory['newOrder'], array('identifiers' => $identifiers));
+	$order = json_decode($response, TRUE);
+	foreach ($order['authorizations'] as $authorization) {
+		$response = signed_request($authorization);
+		$response = json_decode($response, TRUE);
+		if ($response['status'] !== 'pending') continue;
+		$domain = $response['identifier']['value'];
+		foreach ($response['challenges'] as $challenge) {
+			if ($challenge['status'] !== 'pending') continue;
+			if ($challenge['type'] === 'http-01') {
+				if (preg_match('[^a-zA-Z0-9_-]', $challenge['token']) !== 0) throw new Exception('Challenge token contains illegal characters');
+				$keyauth = $challenge['token'].'.'.$account_thumb_print;
+				$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], $keyauth, $challenge['token']);
+				try {
+					$response = signed_request($challenge['url'], new stdClass());
+					$response = json_decode($response, true);
+					while ($response['status'] === 'pending' || $response['status'] === 'processing') {
+						usleep(500000); //0.5sec
+						$response = signed_request($authorization);
+						$response = json_decode($response, TRUE);
+					}
+					$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], NULL, $challenge['token']);
+				} catch (Exception $ex) {
+					$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], NULL, $challenge['token']);
+					throw $ex;
+				}
+				if ($response['status'] !== 'valid') throw new Exception('Challenge rejected for domain '.$domain.' ('.$response['status'].')');
 			}
-			$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], NULL, $challenge['token']);
-		} catch (Exception $ex) {
-			$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], NULL, $challenge['token']);
-			throw $ex;
 		}
-		if ($response['status'] != 'valid') throw new Exception('Challenge rejected for domain '.$domain.' ('.$response['status'].')');
 	}
+	$csr = generateCertificateSigningRequest($server_key, $domains);
+	$response = signed_request($order['finalize'], array('csr' => urlbase64($csr)));
+	$order = json_decode($response, TRUE);
+	$response = signed_request($order['certificate']);
+	return $response;
 }
 
-function signed_request($url, $payload, $accept_errors = array()) {
-	global $acme_server, $acme_nonce, $account_key;
+function signed_request($url, $payload = NULL, $accept_errors = array()) {
+	global $directory, $acme_nonce, $account_key, $account_key_id;
+	if (substr($url, 0, 8) !== 'https://') throw new Exception('Invalid endpoint');
 	if ($acme_nonce === NULL) {
-		file_get_contents($acme_server.'/directory', false, stream_context_create(array('http' => array('timeout' => 10))));
+		if (substr($directory['newNonce'], 0, 8) !== 'https://') throw new Exception('Invalid newNonce endpoint');
+		file_get_contents($directory['newNonce'], false, stream_context_create(array('http' => array('timeout' => 10, 'method' => 'HEAD'))));
 		$acme_nonce = get_http_response_header($http_response_header, 'Replay-Nonce');
 	}
-	$account_key_params = openssl_pkey_get_details($account_key);
-	$header = array(
-		'alg' => 'RS256',
-		'jwk' => array('e'=> urlbase64($account_key_params['rsa']['e']), 'kty' => 'RSA', 'n' => urlbase64($account_key_params['rsa']['n'])),
-	);
-	$protected = urlbase64(json_encode(array(
-		'alg' => 'RS256',
-		'jwk' => $header['jwk'],
-		'nonce' => $acme_nonce,
-	)));
+	$protected = array('alg' => 'RS256', 'nonce' => $acme_nonce, 'url' => $url);
+	if ($account_key_id === NULL) {
+		$account_key_params = openssl_pkey_get_details($account_key);
+		$protected['jwk'] = array('e'=> urlbase64($account_key_params['rsa']['e']), 'kty' => 'RSA', 'n' => urlbase64($account_key_params['rsa']['n']));
+	} else {
+		$protected['kid'] = $account_key_id;
+	}
+	$protected = urlbase64(json_encode($protected));
 	$acme_nonce = NULL;
-	$payload = urlbase64(json_encode($payload));
+	$payload = $payload === NULL ? '' : urlbase64(json_encode($payload));
 	$signed = NULL;
 	openssl_sign($protected.'.'.$payload, $signed, $account_key, 'sha256WithRSAEncryption');
 	$signed = urlbase64($signed);
-	$data = json_encode(array('header'=> $header, 'protected'=> $protected, 'payload'=> $payload, 'signature'=> $signed));
+	$data = json_encode(array('protected'=> $protected, 'payload'=> $payload, 'signature'=> $signed));
 	$http_options = array('http' => array(
 		'timeout' => 10,
 		'method' => 'POST',
-		'header' => array('Content-Type: application/json'),
+		'header' => array('Content-Type: application/jose+json'),
 		'content' => $data,
 		'ignore_errors' => TRUE,
 	));
-	if ($url[0] == '/') $url = $acme_server.$url;
 	$ret = file_get_contents($url, false, stream_context_create($http_options));
 	$status = get_http_response_header($http_response_header, NULL);
 	if (($status < 200 || $status > 299) && !in_array($status, $accept_errors)) throw new Exception('ACME server error: '.$ret);
 	$acme_nonce = get_http_response_header($http_response_header, 'Replay-Nonce');
+	if ($url === $directory['newAccount']) $account_key_id = get_http_response_header($http_response_header, 'Location'); //Hack. Why couldn't they just put everything in the JSON body?
 	return $ret;
 }
 

@@ -31,5 +31,5 @@ Example usage:
 Credits, contact & fun facts
 ----------------------------
 * Written by Ivo Smits, [UCIS Internet](http://www.ucis.nl) <<Ivo@UCIS.nl>> and released under the Simplified BSD License
-* Based on my own [C# ACME client](https://github.com/UCIS/UCIS.Core/blob/master/NaCl/SSLUtils.cs), which in turn is based on the pretty nice [Bash script from Calomel](https://calomel.org/lets_encrypt_client.html).
+* Based on my own [C# ACME client](https://github.com/UCIS/UCIS.Core/blob/master/NaCl/ACMEClient.cs), which in turn is based on the pretty nice [Bash script from Calomel](https://calomel.org/lets_encrypt_client.html).
 * I had to generate a CSR from scratch because C#/.Net doesn't support CSR generation at all and PHP's OpenSSL extension does not support alternative subject names. You wouldn't believe how many different RFCs are involved...
