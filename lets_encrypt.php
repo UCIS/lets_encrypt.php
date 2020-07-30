@@ -109,7 +109,7 @@ function get_certificate($server_key, $domains, $challenge_callback) {
 					$response = json_decode($response, true);
 					while ($response['status'] === 'pending' || $response['status'] === 'processing') {
 						usleep(500000); //0.5sec
-						$response = signed_request($authorization);
+						$response = signed_request($challenge['url']);
 						$response = json_decode($response, TRUE);
 					}
 					$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], NULL, $challenge['token']);
@@ -117,7 +117,7 @@ function get_certificate($server_key, $domains, $challenge_callback) {
 					$challenge_callback('/.well-known/acme-challenge/'.$challenge['token'], NULL, $challenge['token']);
 					throw $ex;
 				}
-				if ($response['status'] !== 'valid') throw new Exception('Challenge rejected for domain '.$domain.' ('.$response['status'].')');
+				if ($response['status'] !== 'valid') throw new Exception('Challenge rejected for domain '.$domain.': '.(isset($response['error']['detail']) ? $response['error']['detail'] : $response['status']));
 			}
 		}
 	}
@@ -159,7 +159,13 @@ function signed_request($url, $payload = NULL, $accept_errors = array()) {
 	));
 	$ret = file_get_contents($url, false, stream_context_create($http_options));
 	$status = get_http_response_header($http_response_header, NULL);
-	if (($status < 200 || $status > 299) && !in_array($status, $accept_errors)) throw new Exception('ACME server error: '.$ret);
+	if (($status < 200 || $status > 299) && !in_array($status, $accept_errors)) {
+		if (get_http_response_header($http_response_header, 'Content-Type') === 'application/problem+json' && ($obj = json_decode($ret, TRUE)) !== NULL && isset($obj['detail'])) {
+			throw new Exception('ACME server error: '.$obj['detail']);
+		} else {
+			throw new Exception('ACME server error: '.$ret);
+		}
+	}
 	$acme_nonce = get_http_response_header($http_response_header, 'Replay-Nonce');
 	if ($url === $directory['newAccount']) $account_key_id = get_http_response_header($http_response_header, 'Location'); //Hack. Why couldn't they just put everything in the JSON body?
 	return $ret;
@@ -229,7 +235,7 @@ function generateCertificateSigningRequest($pkey, $domains) {
 	$altnames = '';
 	foreach ($domains as $domain) $altnames .= encodeDerTag(2, false, 0x02, $domain);
 	$domain = reset($domains);
-	$csr = 
+	$csr =
 		encodeDerTag(0, true, 0x10, //SEQUENCE
 			encodeDerTag(0, false, 0x02, chr(0)). //INTEGER version: 0
 			encodeDerTag(0, true, 0x10, //SEQUENCE

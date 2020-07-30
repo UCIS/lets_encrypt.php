@@ -1,6 +1,6 @@
 lets_encrypt.php
 ================
-This script provides a simple, self-contained ACME client implementation in PHP, primarily written
+This script provides a simple, self-contained ACME v2 client implementation in PHP, primarily written
 for use with the [Let's Encrypt Certificate Authority](https://letsencrypt.org/).
 
 The only requirement is a somewhat recent PHP version (5.3.3 has been confirmed to work) with HTTP
